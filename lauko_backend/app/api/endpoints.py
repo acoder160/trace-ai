@@ -1,8 +1,9 @@
 import json
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, text  # Added 'text' for raw SQL execution
 import fitz  # PyMuPDF
 
 from app.schemas.chat import ChatRequest, ChatResponse
@@ -12,12 +13,113 @@ from app.models.chat_history import Message, UserProfile
 
 router = APIRouter()
 
-# The base persona
-BASE_SYSTEM_PROMPT = """
-You are lauko, a proactive and highly empathetic AI companion.
-Your goal is to help the user track their habits, manage their schedule, and provide emotional support.
-Always keep your answers concise, friendly, and structured.
+# --- Dynamic Prompt Generator ---
+def build_system_prompt(dossier_content: str, location: str = "Unknown Location") -> str:
+    """
+    Builds the foundational persona and awareness for Lauko.
+    Injects real-time data so the LLM is aware of the current date and location.
+    """
+    now = datetime.now()
+    current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    current_year = now.year
+    
+    system_prompt = f"""
+You are Lauko, a proactive, intelligent, and highly capable AI companion.
+
+[REAL-WORLD CONTEXT]
+- Current Date and Time: {current_time}
+- Current Year: {current_year}
+- User Location: {location}
+CRITICAL INSTRUCTION: Always use this real-world context for planning, answering questions about time, or organizing the user's schedule. Do not rely on your training data for the current date or year.
+
+[USER DOSSIER (Level 3 Memory)]
+Here is everything you know about this specific user:
+{dossier_content}
+
+[YOUR PERSONA & GUIDELINES]
+- You are concise, sharp, and helpful. Do not be overly verbose.
+- Never use robotic phrases like "As an AI language model..." or "I don't have real-time access...".
+- You actively push the user towards their goals based on the User Dossier.
+- Format your answers beautifully using Markdown.
 """
+    return system_prompt
+
+# --- NEW: Proactive Task Extractor ---
+async def extract_and_schedule_task(user_id: str, new_message: str, db: AsyncSession):
+    """
+    BACKGROUND TASK: Proactive Calendar & Reminder Engine.
+    Analyzes the user's message to see if a future reminder or task needs to be scheduled.
+    If so, it writes the task to the scheduled_tasks table in Supabase.
+    """
+    try:
+        current_iso_time = datetime.now(timezone.utc).isoformat()
+        
+        # 1. Instruct LLM to act as a Time-Parsing Agent
+        scheduler_prompt = f"""
+You are an internal scheduling agent. Your job is to analyze a user's message and extract any future reminders, events, or tasks they mention.
+
+[CURRENT EXACT TIME (UTC)]: {current_iso_time}
+
+[USER MESSAGE]:
+"{new_message}"
+
+Determine if the user's message requires a future follow-up (e.g., "remind me in 6 hours", "I have an interview tomorrow", "ask me about my run tonight").
+
+If a reminder/task IS needed, calculate the exact future time and respond with this JSON format:
+{{
+    "has_task": true,
+    "scheduled_at": "YYYY-MM-DDTHH:MM:SSZ", 
+    "task_type": "reminder",
+    "context": "Short text explaining what you need to remind the user about."
+}}
+
+If NO reminder is needed, respond with:
+{{
+    "has_task": false
+}}
+
+Respond ONLY with valid JSON. No markdown ticks, no conversational text.
+"""
+        # 2. Call the LLM (fast model preferred)
+        scheduler_result = await llm_manager.generate_response(
+            system_prompt="You output strictly valid JSON.",
+            user_message=scheduler_prompt
+        )
+
+        if scheduler_result["status"] == "success":
+            raw_content = scheduler_result["content"].strip()
+            
+            # Clean Markdown if present
+            if raw_content.startswith("```json"):
+                raw_content = raw_content[7:-3].strip()
+            elif raw_content.startswith("```"):
+                raw_content = raw_content[3:-3].strip()
+
+            try:
+                parsed_json = json.loads(raw_content)
+                
+                # 3. If the LLM identified a task, save it to the database
+                if parsed_json.get("has_task") and parsed_json.get("scheduled_at"):
+                    insert_query = text("""
+                        INSERT INTO scheduled_tasks (user_id, scheduled_at, message_context, task_type)
+                        VALUES (:user_id, :scheduled_at, :message_context, :task_type)
+                    """)
+                    
+                    await db.execute(insert_query, {
+                        "user_id": user_id,
+                        "scheduled_at": parsed_json["scheduled_at"],
+                        "message_context": parsed_json["context"],
+                        "task_type": parsed_json.get("task_type", "reminder")
+                    })
+                    await db.commit()
+                    print(f"[BACKGROUND] Scheduled new task for {user_id} at {parsed_json['scheduled_at']}")
+
+            except json.JSONDecodeError:
+                print(f"[BACKGROUND] Error parsing Scheduler JSON from LLM: {raw_content}")
+
+    except Exception as e:
+        print(f"[BACKGROUND] Task scheduling failed: {e}")
+
 
 async def summarize_old_messages(user_id: str, db: AsyncSession):
     """
@@ -218,12 +320,21 @@ async def process_chat_message(
         profile_result = await db.execute(profile_stmt)
         profile = profile_result.scalar_one_or_none()
 
-        dynamic_system_prompt = BASE_SYSTEM_PROMPT
-        if profile:
-            if profile.conversation_summary:
-                dynamic_system_prompt += f"\n\n[PREVIOUS CONVERSATION SUMMARY]: {profile.conversation_summary}"
-            if profile.dossier and profile.dossier != "{}":
-                dynamic_system_prompt += f"\n\n[USER DOSSIER (CORE FACTS)]: {profile.dossier}"
+        # Construct Dynamic System Prompt
+        dossier_content = "{}"
+        if profile and profile.dossier and profile.dossier != "{}":
+            dossier_content = profile.dossier
+            
+        # Get location from the incoming request payload, default to "Unknown" if not provided
+        user_location = getattr(request, "location", None)
+        if not user_location:
+            user_location = "Unknown Location"
+        
+        dynamic_system_prompt = build_system_prompt(dossier_content, user_location)
+        
+        # Append Level 2 Memory (Summary) if it exists
+        if profile and profile.conversation_summary:
+            dynamic_system_prompt += f"\n\n[PREVIOUS CONVERSATION SUMMARY]: {profile.conversation_summary}"
 
         # 2. Save new incoming message
         db.add(Message(user_id=request.user_id, role="user", content=request.message))
@@ -236,7 +347,7 @@ async def process_chat_message(
 
         chat_history = [{"role": msg.role, "content": msg.content} for msg in recent_messages[:-1]]
 
-        # 4. Generate Response
+        # 4. Generate Response using LLMManager
         llm_result = await llm_manager.generate_response(
             system_prompt=dynamic_system_prompt,
             user_message=request.message,
@@ -250,13 +361,16 @@ async def process_chat_message(
         db.add(Message(user_id=request.user_id, role="assistant", content=llm_result["content"]))
         await db.commit()
 
-        # 6. TRIGGER BACKGROUND TASKS: Memory Optimization
+        # 6. TRIGGER BACKGROUND TASKS: Proactive Agents & Memory Optimization
         
         # Task 1: Check if we need to summarize old messages (Level 2)
         background_tasks.add_task(summarize_old_messages, request.user_id, db)
         
         # Task 2: Extract hard facts into the JSON Dossier (Level 3)
         background_tasks.add_task(update_user_dossier, request.user_id, request.message, db)
+        
+        # --- NEW Task 3: Check if the user is asking for a reminder/schedule ---
+        background_tasks.add_task(extract_and_schedule_task, request.user_id, request.message, db)
 
         return ChatResponse(
             status="success",
@@ -266,5 +380,3 @@ async def process_chat_message(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-    
-    

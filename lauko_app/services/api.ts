@@ -6,12 +6,14 @@ const API_URL = 'http://localhost:8000/api/v1';
 // TODO: Replace with dynamic UUID after implementing Auth integration.
 const USER_ID = 'developer_1'; 
 
+
 export const api = {
-  async sendMessage(text: string) {
+  async sendMessage(text: string, location: string | null = null) {
     try {
       const response = await axios.post(`${API_URL}/chat`, {
         message: text,
         user_id: USER_ID,
+        location: location // Send the dynamic location
       });
       return response.data;
     } catch (error) {

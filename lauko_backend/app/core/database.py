@@ -1,44 +1,30 @@
-import logging
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from app.core.config import settings
+from sqlalchemy.pool import NullPool
 
-logger = logging.getLogger("lauko-Database")
-
-# Path to our local SQLite database file
-# We use aiosqlite driver for non-blocking async operations
-SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///./lauko_data.db"
-
-# Create the asynchronous engine
+# --- Initialize the async engine using the Supabase URL ---
+# pool_pre_ping=True helps prevent connection drops with cloud databases
 engine = create_async_engine(
-    SQLALCHEMY_DATABASE_URL,
+    settings.DATABASE_URL,
     echo=False,
-    connect_args={"check_same_thread": False}
+    future=True,
+    poolclass=NullPool 
 )
 
-# Enable WAL (Write-Ahead Logging) mode for extreme SQLite performance
-@event.listens_for(engine.sync_engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.close()
-
-# Create an async session factory
-AsyncSessionLocal = async_sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
+# Create a robust session factory
+AsyncSessionLocal = sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False
 )
 
-class Base(DeclarativeBase):
-    """
-    Base class for all SQLAlchemy ORM models.
-    """
-    pass
+Base = declarative_base()
 
 async def get_db():
     """
-    Dependency generator for FastAPI endpoints.
-    Ensures safe creation and closure of database sessions.
+    Dependency generator for FastAPI endpoints to get a DB session.
+    Automatically handles opening and closing the connection.
     """
     async with AsyncSessionLocal() as session:
         try:

@@ -1,8 +1,8 @@
 /**
- * Lauko AI - Sprint 1.2: Input Area Pixel-Perfect Polish
+ * Lauko AI - Sprint 1.2 & 2.1: UI Polish & Dynamic Location Context
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Markdown from 'react-native-markdown-display';
 import * as DocumentPicker from 'expo-document-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -33,8 +33,26 @@ export default function App() {
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [userLocation, setUserLocation] = useState<string | null>(null);
   
   const flatListRef = useRef<FlatList>(null);
+
+  // Fetch user location automatically on app load
+  useEffect(() => {
+    const fetchLocation = async () => {
+      try {
+        const response = await axios.get('https://ipapi.co/json/');
+        if (response.data && response.data.city && response.data.country_name) {
+          setUserLocation(`${response.data.city}, ${response.data.country_name}`);
+        }
+      } catch (error) {
+        console.warn("[Location Error] Could not fetch location automatically", error);
+        // Silently fail, it will fall back to "Unknown Location" on the backend
+      }
+    };
+    
+    fetchLocation();
+  }, []);
 
   const handlePickDocument = async () => {
     try {
@@ -64,7 +82,7 @@ export default function App() {
     if (currentFile) {
       newMessages.push({ 
         id: Date.now().toString() + '_f', 
-        text: `📎 **Документ загружен:** ${currentFile.name}`, 
+        text: `📎 **Document uploaded:** ${currentFile.name}`, 
         sender: 'user' 
       });
     }
@@ -101,12 +119,13 @@ export default function App() {
 
       let textToSend = currentText;
       if (currentFile && !currentText) {
-        textToSend = `Я только что загрузил файл "${currentFile.name}". Подтверди получение и скажи, какие ключевые факты ты из него извлек для моего досье.`;
+        textToSend = `I just uploaded the file "${currentFile.name}". Please confirm receipt and summarize the key facts you extracted for my dossier.`;
       }
 
       let botResponseText = "";
       if (textToSend) {
-        const response = await api.sendMessage(textToSend);
+        // Pass the dynamic location to the backend
+        const response = await api.sendMessage(textToSend, userLocation);
         botResponseText = response.response;
       }
 
@@ -119,7 +138,7 @@ export default function App() {
     } catch (error) {
       setMessages((prev) => [...prev, {
         id: (Date.now() + 1).toString(),
-        text: '❌ Ошибка сети. Бэкенд не отвечает.',
+        text: '❌ Network error. The backend is not responding.',
         sender: 'bot',
       }]);
     } finally {
@@ -152,8 +171,8 @@ export default function App() {
       <LinearGradient colors={['#007AFF', '#00C6FF']} style={styles.logoContainer}>
         <Ionicons name="planet" size={48} color="#FFF" />
       </LinearGradient>
-      <Text style={styles.welcomeTitle}>Привет, я Lauko</Text>
-      <Text style={styles.welcomeSubtitle}>Твой проактивный AI-компаньон. Чем могу помочь сегодня?</Text>
+      <Text style={styles.welcomeTitle}>Hi, I'm Lauko</Text>
+      <Text style={styles.welcomeSubtitle}>Your proactive AI companion. How can I help you today?</Text>
     </View>
   );
 
@@ -190,7 +209,7 @@ export default function App() {
       {isLoading && (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="small" color="#007AFF" />
-          <Text style={styles.loadingText}>Lauko думает...</Text>
+          <Text style={styles.loadingText}>Lauko is thinking...</Text>
         </View>
       )}
 
@@ -214,7 +233,7 @@ export default function App() {
 
           <TextInput
             style={styles.input}
-            placeholder="Написать Lauko..."
+            placeholder="Message Lauko..."
             placeholderTextColor="#999"
             value={inputText}
             onChangeText={setInputText}

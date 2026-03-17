@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typing import Optional
 
 class ChatRequest(BaseModel):
     """
@@ -6,6 +7,8 @@ class ChatRequest(BaseModel):
     """
     message: str = Field(..., min_length=1, max_length=2000, description="User's input message")
     user_id: str = Field(..., description="Unique identifier for the user")
+    # Added the optional location field:
+    location: Optional[str] = Field(None, description="Dynamic user location (e.g., City, Country)")
 
 class ChatResponse(BaseModel):
     """

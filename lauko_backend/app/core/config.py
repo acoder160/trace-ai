@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     """
     GROQ_API_KEY: str
     OPENROUTER_API_KEY: str
+    DATABASE_URL: str
 
     # Instruct Pydantic to read from the .env file
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
