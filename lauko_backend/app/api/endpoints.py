@@ -1,8 +1,9 @@
 import json
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import delete, func
+import fitz  # PyMuPDF
 
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.core.llm_manager import llm_manager
@@ -74,7 +75,43 @@ async def summarize_old_messages(user_id: str, db: AsyncSession):
             await db.commit()
             print(f"[BACKGROUND] Summarization complete for {user_id}. DB cleaned.")
 
+@router.post("/upload-file")
+async def upload_file(
+    user_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Endpoint to handle file uploads. Extracts text and triggers Dossier update.
+    """
+    content = ""
+    
+    if file.content_type == "application/pdf":
+        # Read PDF content
+        pdf_bytes = await file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page in doc:
+            content += page.get_text()
+    elif file.content_type == "text/plain":
+        # Read TXT content
+        content = (await file.read()).decode("utf-8")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type.")
 
+    if not content:
+        raise HTTPException(status_code=400, detail="File is empty or unreadable.")
+
+    # Trigger Level 3 Memory update (Dossier) in background based on file content
+    # We treat the file content as a very long "message" to extract facts from.
+    background_tasks.add_task(update_user_dossier, user_id, f"DOCUMENT CONTENT: {content[:5000]}", db)
+
+    return {
+        "status": "success",
+        "message": "File processed. Lauko is analyzing the information to update your profile.",
+        "extracted_text_snippet": content[:200] + "..."
+    }
+    
 async def update_user_dossier(user_id: str, new_message: str, db: AsyncSession):
     """
     BACKGROUND TASK: Level 3 Memory (Dossier).
